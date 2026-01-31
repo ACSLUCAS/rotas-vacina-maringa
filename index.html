@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Rotas ACS Maringá (OSRM)</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <style>
+    body{font-family:Arial,sans-serif;margin:16px;max-width:1100px}
+    textarea,input,select,button{width:100%;padding:10px;font-size:14px}
+    textarea{height:180px}
+    .row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+    .box{border:1px solid #eee;border-radius:12px;background:#fafafa;padding:12px;margin-bottom:12px}
+    #map{height:520px;border:1px solid #ddd;border-radius:12px}
+    .small{color:#555;font-size:0.95em}
+    .err{color:#b00}
+    .ok{color:#060}
+    ol{margin:6px 0 0 18px}
+    .team{border-left:4px solid #999;padding-left:10px;margin:10px 0}
+    code{background:#f1f1f1;padding:2px 4px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <h2>Gerador de rotas (OSRM) — múltiplas equipes</h2>
+
+  <div class="box">
+    <div class="small">
+      Cole endereços (1 por linha). Ex.: <i>“Rua X, 123, Maringá - PR”</i>.<br/>
+      <b>Atenção:</b> este protótipo usa Nominatim público (limite ~1 req/seg). :contentReference[oaicite:3]{index=3}
+      Para uso “oficial” na prefeitura/secretaria, o ideal é um geocoder/OSRM próprio.
+    </div>
+  </div>
+
+  <div class="box">
+    <label><b>Ponto de saída/retorno (base)</b> (ex.: UBS/UPA):</label>
+    <input id="base" placeholder="Ex.: UBS Alvorada, Maringá - PR" value="UBS Alvorada, Maringá - PR"/>
+
+    <div class="row" style="margin-top:10px">
+      <div>
+        <label><b>Nº de equipes</b></label>
+        <input id="teams" type="number" min="1" max="10" value="2"/>
+      </div>
+      <div>
+        <label><b>Horas por equipe</b></label>
+        <input id="hours" type="number" min="1" max="12" value="6"/>
+      </div>
+      <div>
+        <label><b>Tempo vacinação por domicílio (min)</b></label>
+        <input id="service" type="number" min="0" max="60" value="10"/>
+      </div>
+    </div>
+
+    <label style="margin-top:10px"><b>Endereços (1 por linha)</b></label>
+    <textarea id="addresses" placeholder="Endereço 1&#10;Endereço 2&#10;..."></textarea>
+
+    <button style="margin-top:10px" onclick="run()">Gerar rotas</button>
+    <div id="status" class="small"></div>
+  </div>
+
+  <div id="output" class="box"></div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // ===== Config =====
+    const OSRM = "https://router.project-osrm.org"; // demo público
+    const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+    const CITY_HINT = "Maringá - PR";
+
+    // ===== Leaflet map =====
+    const map = L.map("map").setView([-23.420999, -51.933056], 12); // Maringá
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const layers = {
+      routes: L.layerGroup().addTo(map),
+      points: L.layerGroup().addTo(map),
+    };
+
+    function setStatus(html, cls="") {
+      const el = document.getElementById("status");
+      el.className = "small " + cls;
+      el.innerHTML = html;
+    }
+
+    function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+    // ===== Geocoding (Nominatim) =====
+    async function geocodeOne(query) {
+      // Nominatim exige identificação do app (User-Agent/Referer). No browser, o Referer ajuda.
+      // Ainda assim, mantenha baixa carga (1 req/seg).
+      const url = `${NOMINATIM}?format=json&limit=1&q=${encodeURIComponent(query)}`;
+      const resp = await fetch(url, { headers: { "Accept": "application/json" }});
+      const data = await resp.json();
+      if (!data || !data[0]) throw new Error(`Não encontrei: "${query}"`);
+      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), display: data[0].display_name };
+    }
+
+    async function geocodeAll(baseText, addresses) {
+      setStatus("Geocodificando... (1 endereço/seg para respeitar o serviço público)", "ok");
+      const points = [];
+
+      // Base
+      const baseQ = baseText.includes("Maringá") ? baseText : `${baseText}, ${CITY_HINT}`;
+      const base = await geocodeOne(baseQ);
+      points.push({ ...base, label: "BASE", raw: baseText });
+
+      // Stops
+      for (let i=0;i<addresses.length;i++){
+        const a = addresses[i];
+        const q = a.includes("Maringá") ? a : `${a}, ${CITY_HINT}`;
+        const p = await geocodeOne(q);
+        points.push({ ...p, label: `P${i+1}`, raw: a });
+        await sleep(1000); // respeitar ~1 req/s
+      }
+      return points;
+    }
+
+    // ===== OSRM helpers =====
+    function coordsToString(coords) {
+      // OSRM usa lon,lat; separados por ;
+      return coords.map(c => `${c.lon},${c.lat}`).join(";");
+    }
+
+    async function osrmTable(points) {
+      // Tabela de durações: segundos (Table service)
+      const coords = coordsToString(points);
+      const url = `${OSRM}/table/v1/driving/${coords}?annotations=duration`;
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.code !== "Ok") throw new Error("OSRM Table falhou: " + (j.message || j.code));
+      return j.durations; // matrix NxN (seconds)
+    }
+
+    async function osrmTrip(points, roundtrip=true) {
+      // Trip resolve TSP para UM veículo. Dá para fixar início/fim.
+      const coords = coordsToString(points);
+      const url = `${OSRM}/trip/v1/driving/${coords}?source=first&destination=last&roundtrip=${roundtrip?"true":"false"}&overview=full&geometries=geojson`;
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.code !== "Ok") throw new Error("OSRM Trip falhou: " + (j.message || j.code));
+      return j;
+    }
+
+    async function osrmRoute(pointsOrdered) {
+      const coords = coordsToString(pointsOrdered);
+      const url = `${OSRM}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.code !== "Ok") throw new Error("OSRM Route falhou: " + (j.message || j.code));
+      return j;
+    }
+
+    // ===== Heurística de alocação (multi-equipes com limite de tempo) =====
+    // Estratégia simples e prática:
+    // - começa tudo vazio por equipe
+    // - para cada ponto, tenta colocar na equipe que gera menor tempo incremental (base->...->base aproximado)
+    // - respeita limite: (viagem + serviço) <= horasMax
+    function assignStopsGreedy(stopsIdx, durations, nTeams, maxSeconds, serviceSeconds) {
+      const teams = Array.from({length:nTeams}, () => ({ stops: [], used: 0 }));
+
+      // custos aproximados: usamos ida/volta à base (idx 0) para estimar incremento
+      function estimateAddCost(team, stop) {
+        // aproximação: se equipe vazia, custo ~ base->stop->base
+        // se já tem paradas, custo ~ (base->stop + stop->base)/2 como heurística leve
+        const base = 0;
+        const t = team.stops.length === 0
+          ? (durations[base][stop] + durations[stop][base])
+          : (durations[base][stop] + durations[stop][base]) * 0.6; // heurística
+        return t + serviceSeconds;
+      }
+
+      for (const s of stopsIdx) {
+        let best = -1;
+        let bestCost = Infinity;
+
+        for (let k=0;k<nTeams;k++){
+          const cost = estimateAddCost(teams[k], s);
+          if (teams[k].used + cost <= maxSeconds && cost < bestCost) {
+            bestCost = cost;
+            best = k;
+          }
+        }
+
+        // Se nenhuma equipe couber, joga na que tiver menor "estouro" (pra não travar)
+        if (best === -1) {
+          let minOverflow = Infinity;
+          for (let k=0;k<nTeams;k++){
+            const cost = estimateAddCost(teams[k], s);
+            const overflow = (teams[k].used + cost) - maxSeconds;
+            if (overflow < minOverflow) { minOverflow = overflow; best = k; bestCost = cost; }
+          }
+        }
+
+        teams[best].stops.push(s);
+        teams[best].used += bestCost;
+      }
+      return teams;
+    }
+
+    // ===== UI: desenhar =====
+    function clearMap() {
+      layers.routes.clearLayers();
+      layers.points.clearLayers();
+    }
+
+    function addPointMarker(p, label) {
+      const m = L.marker([p.lat, p.lon]).addTo(layers.points);
+      m.bindPopup(`<b>${label}</b><br/>${p.raw || p.display}`);
+      return m;
+    }
+
+    function addRouteGeoJSON(geojson, name) {
+      const layer = L.geoJSON(geojson, { weight: 5 }).addTo(layers.routes);
+      layer.bindPopup(`<b>${name}</b>`);
+      return layer;
+    }
+
+    function fmtHMS(seconds){
+      const s = Math.max(0, Math.round(seconds));
+      const h = Math.floor(s/3600);
+      const m = Math.floor((s%3600)/60);
+      return `${h}h ${m}min`;
+    }
+
+    async function run() {
+      clearMap();
+      document.getElementById("output").innerHTML = "";
+      try {
+        const baseText = document.getElementById("base").value.trim();
+        const nTeams = parseInt(document.getElementById("teams").value, 10);
+        const hours = parseFloat(document.getElementById("hours").value);
+        const serviceMin = parseFloat(document.getElementById("service").value);
+
+        const lines = document.getElementById("addresses").value
+          .split("\n").map(s=>s.trim()).filter(Boolean);
+
+        if (!baseText) throw new Error("Preencha a base (UBS/UPA).");
+        if (lines.length < 2) throw new Error("Cole pelo menos 2 endereços.");
+        if (lines.length > 25) throw new Error("Limite do protótipo: 25 endereços (para não abusar de geocoding).");
+        if (nTeams < 1) throw new Error("Nº de equipes inválido.");
+
+        setStatus("1) Geocodificando endereços…", "ok");
+        const points = await geocodeAll(baseText, lines);
+
+        // Marcadores
+        addPointMarker(points[0], "BASE");
+        for (let i=1;i<points.length;i++) addPointMarker(points[i], `P${i}`);
+
+        setStatus("2) Calculando matriz de tempos (OSRM Table)…", "ok");
+        const durations = await osrmTable(points);
+
+        const maxSeconds = hours * 3600;
+        const serviceSeconds = serviceMin * 60;
+
+        setStatus("3) Dividindo pontos entre equipes (heurística com limite de horas)…", "ok");
+        const stopIdx = Array.from({length: points.length-1}, (_,i)=> i+1); // 1..N
+        const teams = assignStopsGreedy(stopIdx, durations, nTeams, maxSeconds, serviceSeconds);
+
+        setStatus("4) Ordenando paradas por equipe (OSRM Trip) e desenhando rotas…", "ok");
+        const out = [];
+
+        const bounds = [];
+        for (let t=0;t<teams.length;t++){
+          const team = teams[t];
+          if (team.stops.length === 0) {
+            out.push(`<div class="team"><b>Equipe ${t+1}</b>: (sem paradas)</div>`);
+            continue;
+          }
+
+          // Monta lista: BASE + stops + BASE (para ter início/fim fixos)
+          // A gente fixa source=first e destination=last; roundtrip=false.
+          const teamPoints = [points[0], ...team.stops.map(i=>points[i]), points[0]];
+          const trip = await osrmTrip(teamPoints, false);
+
+          // Trip retorna waypoints na ordem otimizada (waypoint_index)
+          const ordered = trip.waypoints
+            .slice() // copia
+            .sort((a,b)=> a.waypoint_index - b.waypoint_index)
+            .map(wp => ({ lon: wp.location[0], lat: wp.location[1] }));
+
+          // Para imprimir sequência com nomes: aproximamos pelo ponto mais próximo
+          function nearestName(coord){
+            let best=-1, d=1e18;
+            for (const p of teamPoints){
+              const dx = p.lat - coord.lat, dy = p.lon - coord.lon;
+              const dd = dx*dx + dy*dy;
+              if (dd < d){ d=dd; best=p; }
+            }
+            return best.label === "BASE" ? "BASE" : best.raw;
+          }
+
+          // Desenhar rota com Route
+          const route = await osrmRoute(ordered.map(c=>({lon:c.lon, lat:c.lat})));
+          const geo = route.routes[0].geometry;
+          addRouteGeoJSON(geo, `Equipe ${t+1}`);
+
+          // Fit bounds
+          geo.coordinates.forEach(c => bounds.push([c[1], c[0]]));
+
+          const durationSec = route.routes[0].duration + (team.stops.length * serviceSeconds);
+
+          // Sequência (tira repetição de BASE no meio)
+          const seq = ordered.map(nearestName).filter((v,i,a)=> !(i>0 && v==="BASE" && a[i-1]==="BASE"));
+          out.push(`
+            <div class="team">
+              <b>Equipe ${t+1}</b> — paradas: ${team.stops.length} — tempo estimado (viagem + vacinação): <b>${fmtHMS(durationSec)}</b>
+              <ol>${seq.map(s=>`<li>${s}</li>`).join("")}</ol>
+              <div class="small">Obs.: tempo de vacinação por parada = ${serviceMin} min (incluído no total).</div>
+            </div>
+          `);
+        }
+
+        document.getElementById("output").innerHTML = `
+          <b>Rotas geradas</b><br/>
+          <div class="small">
+            Motor: <code>OSRM demo</code> + <code>Nominatim público</code> (evite uso pesado).
+          </div>
+          ${out.join("")}
+        `;
+
+        if (bounds.length) map.fitBounds(bounds, { padding: [20,20] });
+        setStatus("Concluído ✅", "ok");
+      } catch (e) {
+        setStatus(`<span class="err">${e.message}</span>`, "err");
+      }
+    }
+  </script>
+</body>
+</html>
