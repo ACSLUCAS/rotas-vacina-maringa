@@ -27,8 +27,7 @@
   <div class="box">
     <div class="small">
       Cole endereços (1 por linha). Ex.: <i>“Rua X, 123, Maringá - PR”</i>.<br/>
-      <b>Atenção:</b> este protótipo usa Nominatim público (limite ~1 req/seg). :contentReference[oaicite:3]{index=3}
-      Para uso “oficial” na prefeitura/secretaria, o ideal é um geocoder/OSRM próprio.
+      <b>Atenção:</b> este protótipo usa geocodificação pública (pode ter limitações). Para uso oficial, o ideal é um geocoder/OSRM próprio.
     </div>
   </div>
 
@@ -90,14 +89,49 @@
 
     // ===== Geocoding (Nominatim) =====
     async function geocodeOne(query) {
-      // Nominatim exige identificação do app (User-Agent/Referer). No browser, o Referer ajuda.
-      // Ainda assim, mantenha baixa carga (1 req/seg).
-      const url = `${NOMINATIM}?format=json&limit=1&q=${encodeURIComponent(query)}`;
-      const resp = await fetch(url, { headers: { "Accept": "application/json" }});
-      const data = await resp.json();
-      if (!data || !data[0]) throw new Error(`Não encontrei: "${query}"`);
-      return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon), display: data[0].display_name };
-    }
+  // Centro aproximado de Maringá (para escolher o resultado mais perto)
+  const MARINGA = { lat: -23.420999, lon: -51.933056 };
+
+  // Viewbox (lon1,lat1,lon2,lat2) — caixa em torno de Maringá
+  // Ajuste se quiser ampliar/reduzir
+  const viewbox = "-52.05,-23.32,-51.80,-23.55";
+
+  const params = new URLSearchParams({
+    format: "jsonv2",
+    addressdetails: "1",
+    limit: "12",                 // pega 5 candidatos
+    countrycodes: "br",         // força Brasil
+    bounded: "1",               // respeita viewbox
+    viewbox: viewbox,
+    "accept-language": "pt-BR",
+    q: query
+  });
+
+  const url = `${NOMINATIM}?${params.toString()}`;
+  const resp = await fetch(url, { headers: { "Accept": "application/json" }});
+  const data = await resp.json();
+
+  if (!data || data.length === 0) throw new Error(`Não encontrei: "${query}"`);
+
+  // Escolhe o candidato mais próximo do centro de Maringá
+  function dist2(item) {
+    const lat = parseFloat(item.lat), lon = parseFloat(item.lon);
+    const dx = lat - MARINGA.lat;
+    const dy = lon - MARINGA.lon;
+    return dx*dx + dy*dy;
+  }
+
+  // Ordena por proximidade e, como desempate, por "importance" (quando existir)
+  data.sort((a,b) => (dist2(a) - dist2(b)) || ((b.importance||0) - (a.importance||0)));
+
+  const best = data[0];
+  return {
+    lat: parseFloat(best.lat),
+    lon: parseFloat(best.lon),
+    display: best.display_name
+  };
+}
+
 
     async function geocodeAll(baseText, addresses) {
       setStatus("Geocodificando... (1 endereço/seg para respeitar o serviço público)", "ok");
