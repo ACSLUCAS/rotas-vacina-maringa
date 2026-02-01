@@ -145,8 +145,21 @@
       // Stops
       for (let i=0;i<addresses.length;i++){
         const a = addresses[i];
-        const q = a.includes("Maringá") ? a : `${a}, ${CITY_HINT}`;
-        const p = await geocodeOne(q);
+
+// Se o ACS digitou "guaira 970" ou "campos sales 1308", transforma em "Rua guaira, 970"
+let q = a;
+const m = a.match(/^(.+?)\s+(\d{1,6})$/); // pega "texto" + "numero"
+if (m) {
+  const street = m[1].trim();
+  const num = m[2].trim();
+  q = `Rua ${street}, ${num}`;
+}
+
+// Completa com cidade/UF para forçar Maringá
+q = q.includes("Maringá") ? q : `${q}, ${CITY_HINT}`;
+
+const p = await geocodeOne(q);
+
         points.push({ ...p, label: `P${i+1}`, raw: a });
         await sleep(1000); // respeitar ~1 req/s
       }
