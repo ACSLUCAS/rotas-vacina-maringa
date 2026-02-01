@@ -147,15 +147,39 @@
         const a = addresses[i];
 
 // Se o ACS digitou "guaira 970" ou "campos sales 1308", transforma em "Rua guaira, 970"
+const a = addresses[i];
+
 let q = a;
-const m = a.match(/^(.+?)\s+(\d{1,6})$/); // pega "texto" + "numero"
+const m = a.match(/^(.+?)\s+(\d{1,6})$/); // "texto" + "numero"
+
 if (m) {
-  const street = m[1].trim();
+  let street = m[1].trim();
   const num = m[2].trim();
-  q = `Rua ${street}, ${num}`;
+
+  // Se não começar com um tipo de logradouro, assume "Rua"
+  const streetLower = street.toLowerCase();
+  const hasType =
+    streetLower.startsWith("rua ") || streetLower.startsWith("r ") || streetLower.startsWith("r. ") ||
+    streetLower.startsWith("avenida ") || streetLower.startsWith("av ") || streetLower.startsWith("av. ") ||
+    streetLower.startsWith("travessa ") || streetLower.startsWith("tv ") || streetLower.startsWith("tv. ") ||
+    streetLower.startsWith("alameda ") || streetLower.startsWith("rodovia ") || streetLower.startsWith("praça ") ||
+    streetLower.startsWith("praca ");
+
+  // Normaliza abreviações comuns
+  if (streetLower.startsWith("av ") || streetLower.startsWith("av. ")) {
+    street = "Avenida " + street.replace(/^av\.?\s+/i, "");
+  }
+  if (streetLower.startsWith("r ") || streetLower.startsWith("r. ")) {
+    street = "Rua " + street.replace(/^r\.?\s+/i, "");
+  }
+  if (streetLower.startsWith("tv ") || streetLower.startsWith("tv. ")) {
+    street = "Travessa " + street.replace(/^tv\.?\s+/i, "");
+  }
+
+  q = hasType ? `${street}, ${num}` : `Rua ${street}, ${num}`;
 }
 
-// Completa com cidade/UF para forçar Maringá
+// Completa com cidade/UF
 q = q.includes("Maringá") ? q : `${q}, ${CITY_HINT}`;
 
 const p = await geocodeOne(q);
